@@ -1,0 +1,272 @@
+Nearby Places Finder – Technical Design (v1)
+1. Overview
+
+Nearby Places Finder is a lightweight web application that shows places around the user’s current location on a map. Users can search nearby places within a radius and optionally filter by place type and keyword. The backend provides a REST API for spatial search. Data is stored in PostgreSQL with PostGIS to enable efficient geospatial queries.
+
+2. Goals
+
+Show a map centered at the user’s location (or a selected map center).
+
+Retrieve and display places within a given radius (meters).
+
+Support filters: place type, keyword query, limit.
+
+Return distance for sorting and UI display.
+
+Keep implementation small enough to complete within 1 day while still being production-like.
+
+3. Non-Goals (v1)
+
+User authentication/authorization.
+
+Complex admin UI for CRUD.
+
+Full cache invalidation strategies.
+
+Real-time updates.
+
+4. High-Level Architecture
+Components
+
+Web Client (React/Next.js)
+
+Gets user location via browser Geolocation API.
+
+Renders map (Leaflet/Mapbox/Google Maps).
+
+Calls backend APIs to fetch nearby places.
+
+Displays places as map markers and as a list sorted by distance.
+
+Backend API (Spring Boot / Node.js)
+
+Validates inputs (lat/lng/radius/filters).
+
+Executes geospatial query in PostGIS.
+
+Returns normalized JSON DTOs for the UI.
+
+Database (PostgreSQL + PostGIS)
+
+Stores places and geospatial coordinates.
+
+Uses spatial index for fast radius search.
+
+Cache (Optional: Redis)
+
+Short TTL caching for repeated nearby searches by geographic grid + filters.
+
+5. Data Model
+5.1 Database Schema
+
+Table: places
+
+id (UUID or BIGSERIAL, PK)
+
+name (TEXT, NOT NULL)
+
+type (TEXT, NOT NULL) — e.g. restaurant, atm, hospital
+
+address (TEXT)
+
+location (GEOGRAPHY(Point, 4326), NOT NULL)
+
+rating (NUMERIC(2,1), optional)
+
+created_at (TIMESTAMP)
+
+updated_at (TIMESTAMP)
+
+5.2 Indexes
+
+Spatial index for radius queries:
+
+CREATE INDEX idx_places_location ON places USING GIST (location);
+
+Filter index (optional but helpful):
+
+CREATE INDEX idx_places_type ON places(type);
+
+Rationale
+
+Using GEOGRAPHY(Point, 4326) makes distance/radius queries straightforward in meters and generally accurate for earth coordinates.
+
+6. API Design
+6.1 Get Nearby Places
+
+Endpoint
+
+GET /api/v1/places/nearby
+
+Query Parameters
+
+lat (required, float) — latitude [-90, 90]
+
+lng (required, float) — longitude [-180, 180]
+
+radius (optional, int) — meters, default 3000, max 20000
+
+type (optional, string) — filter by place type
+
+q (optional, string) — keyword on place name (simple ILIKE)
+
+limit (optional, int) — default 50, max 200
+
+Response (200)
+
+{
+  "center": { "lat": 10.77, "lng": 106.69 },
+  "radius": 3000,
+  "count": 2,
+  "items": [
+    {
+      "id": "c2a7c4b2-5c2a-4e09-8d2c-7b1c8f8e0a11",
+      "name": "ABC Coffee",
+      "type": "restaurant",
+      "lat": 10.7712,
+      "lng": 106.6921,
+      "distance_m": 245,
+      "address": "123 Main St",
+      "rating": 4.4
+    }
+  ]
+}
+
+
+Error Responses
+
+400 Bad Request: invalid coordinates, invalid radius/limit, unsupported type format
+
+500 Internal Server Error: unexpected errors
+
+6.2 Get Place Detail
+
+Endpoint
+
+GET /api/v1/places/{id}
+
+Response (200)
+
+{
+  "id": "…",
+  "name": "…",
+  "type": "…",
+  "address": "…",
+  "lat": 10.77,
+  "lng": 106.69,
+  "rating": 4.4
+}
+
+7. Geospatial Query Strategy (PostGIS)
+7.1 Radius Search
+
+Goal
+
+Return places within radius meters of a center point, sorted by distance.
+
+Approach
+
+Use ST_DWithin for fast filtering (leverages GiST index).
+
+Compute distance via ST_Distance and sort ascending.
+
+Conceptual SQL
+
+Create center:
+
+center = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography
+
+Filter:
+
+ST_DWithin(p.location, center, :radius)
+
+Distance:
+
+ST_Distance(p.location, center) AS distance_m
+
+Sort + limit:
+
+ORDER BY distance_m ASC LIMIT :limit
+
+Performance Notes
+
+Always filter with ST_DWithin before sorting by ST_Distance.
+
+Keep limit bounded to protect DB and UI.
+
+8. Caching (Optional)
+8.1 Cache Key
+
+Cache nearby query results by a coarse geographic grid + filters:
+
+Round lat/lng to 3 decimals (~100m) or use geohash precision.
+
+Key example:
+
+nearby:{latRound}:{lngRound}:{radius}:{type}:{q}:{limit}
+
+8.2 TTL
+
+Short TTL (30–120 seconds) is sufficient for demo and reduces repeated DB work.
+
+8.3 Trade-offs
+
+TTL-based caching is easy and safe for a small demo.
+
+No complex invalidation in v1.
+
+9. Frontend Design
+9.1 Main UI
+
+Map centered on user location with markers for places.
+
+Side panel:
+
+Radius select (1km/3km/5km/10km)
+
+Type select
+
+Keyword input
+
+Result list sorted by distance
+
+9.2 Request Pattern
+
+Debounce filter/map changes (300–500ms).
+
+Cancel inflight request when filters change (AbortController) to prevent race conditions.
+
+Fetch again when:
+
+user location resolved
+
+radius/type/q changes
+
+map center changes (optional mode)
+
+10. Observability (Minimal)
+
+Backend logs per request:
+
+query params (sanitized)
+
+DB query time
+
+result count
+
+cache hit/miss (if enabled)
+
+Health endpoint (optional):
+
+GET /health
+
+11. Deployment
+Recommended: Docker Compose
+
+api (backend)
+
+db (postgres + postgis)
+
+redis (optional)
+
+This makes the project easy to run locally and demo consistently.
